@@ -1,6 +1,4 @@
-# VSM and MSAA
-Small example of a project, that uses variance shadow maps with hardware Multisampling.
+# Marching Cubes calculated on GPU
 
-![Soft shadow and some MSAA](https://github.com/MauriceGit/Variance_Shadow_Maps/blob/master/bin/soft_shadow.png "Soft shadow and some MSAA")
-#Marching Cubes calculated on GPU
-# Marching_Cubes_on_GPU
+A marching cube algorithm, that is executed in parallel on the GPU, using compute shaders.
+This will later enable a highly parallel creation of advanced landscape/terrain structures in potentially real-time (next project).
