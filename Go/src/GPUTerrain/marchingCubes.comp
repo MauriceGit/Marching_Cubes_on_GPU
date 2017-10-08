@@ -1,0 +1,189 @@
+#version 430 core
+
+#define WORK_GROUP_SIZE_X 10
+#define WORK_GROUP_SIZE_Y 10
+#define WORK_GROUP_SIZE_Z 10
+
+layout (local_size_x = WORK_GROUP_SIZE_X, local_size_y = WORK_GROUP_SIZE_Y, local_size_z = WORK_GROUP_SIZE_Z) in;
+
+// A case is the density definition of one cube. Bitwise added number.
+// triangleCount returns the number of triangles to be generated for a given case.
+layout (std430, binding = 0) buffer caseToNumPolys
+{
+    int triangleCount[256];
+};
+
+// edgeConnectList gets the same case as input as caseToNumPolys and as second parameter to the access function)
+// the triangle index. If caseToNumPolys is 3, edgeConnectList has triangle index 0..2 defined.
+layout (std430, binding = 1) buffer edgeConnectList
+{
+    int edgeList[256*5*3];
+};
+
+struct Vertex {
+    vec4 pos;
+    vec4 normal;
+};
+
+struct Triangle {
+    Vertex vertices[3];
+};
+
+// List of triangle positions and normals
+layout (std430, binding = 2) buffer positionList
+{
+    Triangle triangles[];
+};
+
+// Fills the triangleLayoutSizes buffer so we know, how much memory we need next time.
+uniform bool calculateSizeOnly;
+layout (std430, binding = 3) buffer triangleLayoutSizes
+{
+    int layoutSize[];
+};
+layout (std430, binding = 4) buffer marchingCubeCases
+{
+    int cases[];
+};
+
+uniform vec3  sphereCenter;
+uniform float sphereRadius;
+
+
+// Because of internal memory layout issues (especially with std140),
+// I just use it tightly packed and unpack it myself...
+// Ideally, this will be optimized, once marching cubes actually works!
+ivec3 edgeListAt(int index, int triangle) {
+    ivec3 res;
+    res[0] = edgeList[15*index+3*triangle];
+    res[1] = edgeList[15*index+3*triangle+1];
+    res[2] = edgeList[15*index+3*triangle+2];
+    return res;
+}
+
+// Each v can ONLY be 0 or 1 !!!
+int caseNumberFromVertices(int v7, int v6, int v5, int v4, int v3, int v2, int v1, int v0) {
+    return v7*128 + v6*64 + v5*32 + v4*16 + v3*8 + v2*4 + v1*2 + v0*1;
+}
+
+int inSphere(uvec3 pos) {
+    return length(vec3(pos) - sphereCenter) <= sphereRadius ? 1 : 0;
+}
+
+int createCase(uvec3 index) {
+
+    int v0 = inSphere(index);
+    int v1 = inSphere(index + uvec3(0,1,0));
+    int v2 = inSphere(index + uvec3(1,1,0));
+    int v3 = inSphere(index + uvec3(1,0,0));
+    int v4 = inSphere(index + uvec3(0,0,1));
+    int v5 = inSphere(index + uvec3(0,1,1));
+    int v6 = inSphere(index + uvec3(1,1,1));
+    int v7 = inSphere(index + uvec3(1,0,1));
+
+
+    //return caseNumberFromVertices(1,0,0,1,1,0,0,1);
+    return caseNumberFromVertices(v7,v6,v5,v4,v3,v2,v1,v0);
+}
+
+float densityInterpolation(vec3 p, vec3 p1, vec3 p2) {
+
+    float densityAtP1 = length((p+p1) - sphereCenter);
+    float densityAtP2 = length((p+p2) - sphereCenter);
+
+    float maxDensityDifference = densityAtP2-densityAtP1;
+
+    return (sphereRadius - densityAtP1) / maxDensityDifference;
+}
+
+vec3 getIntersectionFromEdge(int edgeIndex, vec3 p) {
+    float f = 0.5;
+    switch (edgeIndex) {
+        // X Interplation
+        case 1:
+            f = densityInterpolation(p, vec3(0,1,0), vec3(1,1,0));
+            return vec3(f,1,0);
+        case 3:
+            f = densityInterpolation(p, vec3(0,0,0), vec3(1,0,0));
+            return vec3(f,0,0);
+        case 5:
+            f = densityInterpolation(p, vec3(0,1,1), vec3(1,1,1));
+            return vec3(f,1,1);
+        case 7:
+            f = densityInterpolation(p, vec3(0,0,1), vec3(1,0,1));
+            return vec3(f,0,1);
+        // Y Interpolation
+        case 0:
+            f = densityInterpolation(p, vec3(0,0,0), vec3(0,1,0));
+            return vec3(0,f,0);
+        case 2:
+            f = densityInterpolation(p, vec3(1,0,0), vec3(1,1,0));
+            return vec3(1,f,0);
+        case 4:
+            f = densityInterpolation(p, vec3(0,0,1), vec3(0,1,1));
+            return vec3(0,f,1);
+        case 6:
+            f = densityInterpolation(p, vec3(1,0,1), vec3(1,1,1));
+            return vec3(1,f,1);
+        // Z Interpolation
+        case 8:
+            f = densityInterpolation(p, vec3(0,0,0), vec3(0,0,1));
+            return vec3(0,0,f);
+        case 9:
+            f = densityInterpolation(p, vec3(0,1,0), vec3(0,1,1));
+            return vec3(0,1,f);
+        case 10:
+            f = densityInterpolation(p, vec3(1,1,0), vec3(1,1,1));
+            return vec3(1,1,f);
+        case 11:
+            f = densityInterpolation(p, vec3(1,0,0), vec3(1,0,1));
+            return vec3(1,0,f);
+    }
+    // Should never get here!
+    return vec3(-10, -10, 0);
+}
+
+void createTrianglesForCase(uvec3 index) {
+
+    uint linearIndex = WORK_GROUP_SIZE_X*WORK_GROUP_SIZE_Y*index.z + WORK_GROUP_SIZE_X*index.y + index.x;
+    int cubeCase = cases[linearIndex];
+    int caseTriangleCount = triangleCount[cubeCase];
+
+    int layoutPos = layoutSize[linearIndex];
+
+    for (int i = 0; i < caseTriangleCount; i++) {
+        ivec3 edgeIntersections = edgeListAt(cubeCase, i);
+
+        vec3 v0 = getIntersectionFromEdge(edgeIntersections[0], vec3(index)) + vec3(index);
+        vec3 v1 = getIntersectionFromEdge(edgeIntersections[1], vec3(index)) + vec3(index);
+        vec3 v2 = getIntersectionFromEdge(edgeIntersections[2], vec3(index)) + vec3(index);
+
+        triangles[layoutPos + i].vertices[0].pos = vec4(v0,0);
+        triangles[layoutPos + i].vertices[1].pos = vec4(v1,0);
+        triangles[layoutPos + i].vertices[2].pos = vec4(v2,0);
+
+        triangles[layoutPos + i].vertices[0].normal = vec4(cross(v1-v0, v2-v0), 0);
+        triangles[layoutPos + i].vertices[1].normal = vec4(cross(v2-v1, v0-v1), 0);
+        triangles[layoutPos + i].vertices[2].normal = vec4(cross(v0-v2, v1-v2), 0);
+
+    }
+}
+
+void calculateMemorySizes(uvec3 index) {
+    int cubeCase = createCase(index);
+    uint i = WORK_GROUP_SIZE_X*WORK_GROUP_SIZE_Y*index.z + WORK_GROUP_SIZE_X*index.y + index.x;
+    cases[i] = cubeCase;
+    layoutSize[i] = triangleCount[cubeCase];
+}
+
+void main(void)
+{
+    uvec3 index = gl_GlobalInvocationID.xyz;
+
+    if (calculateSizeOnly) {
+        calculateMemorySizes(index);
+    } else {
+        createTrianglesForCase(index);
+    }
+
+}
