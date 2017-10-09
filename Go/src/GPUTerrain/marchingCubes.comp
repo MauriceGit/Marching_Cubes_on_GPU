@@ -140,7 +140,7 @@ vec3 getIntersectionFromEdge(int edgeIndex, vec3 p) {
             return vec3(1,0,f);
     }
     // Should never get here!
-    return vec3(-10, -10, 0);
+    return vec3(-10, -10, -10);
 }
 
 void createTrianglesForCase(uvec3 index) {
