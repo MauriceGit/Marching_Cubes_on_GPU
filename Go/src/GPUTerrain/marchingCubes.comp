@@ -66,34 +66,102 @@ int caseNumberFromVertices(int v7, int v6, int v5, int v4, int v3, int v2, int v
     return v7*128 + v6*64 + v5*32 + v4*16 + v3*8 + v2*4 + v1*2 + v0*1;
 }
 
-int inSphere(uvec3 pos) {
-    return length(vec3(pos) - sphereCenter) <= sphereRadius ? 1 : 0;
+
+float densityUnion(float d1, float d2) {
+    float b = 0.4;
+    return -exp(-b*d1) - exp(-b*d2) + 1.;
 }
 
-int createCase(uvec3 index) {
+// For the implicit volume function of the sphere, it returns negative values for
+// solid matter and positive values for no matter. 0 represents the surface.
+//
+// Feel free to insert any implicit function you like!
+float getDensityAtPosition(vec3 pos) {
 
-    int v0 = inSphere(index);
-    int v1 = inSphere(index + uvec3(0,1,0));
-    int v2 = inSphere(index + uvec3(1,1,0));
-    int v3 = inSphere(index + uvec3(1,0,0));
-    int v4 = inSphere(index + uvec3(0,0,1));
-    int v5 = inSphere(index + uvec3(0,1,1));
-    int v6 = inSphere(index + uvec3(1,1,1));
-    int v7 = inSphere(index + uvec3(1,0,1));
+    float x = pos.x;
+    float y = pos.y;
+    float z = pos.z;
+
+    // Sphere
+    float sphere = length(pos + vec3(0,0,0) - sphereCenter) - sphereRadius/1.3;
+    // Flat floor at y == 0.5
+    float floor = y - 3.5;
+    // Flat floor at y == 0
+
+    float dx = sin(y) + sin(z) + 3.5;
+    float dy = sin(x) + sin(z) + 3.5;
+    float dz = sin(x) + sin(y) + 3.5;
+
+    vec3 d = pos - vec3(dx, dy, dz);
+    float surface = min(d.x, min(d.y, d.z));
+
+    //return sphere;
+
+    float gyroid = cos(x) * sin(y) + cos(y) * sin(z) + cos(z) * sin(x);
+    //return gyroid;
+
+    // Move everything to the center!
+    x -= 5.;
+    y -= 5.;
+    z -= 5.;
+    float cylinderR = 2.0;
+    float sphereR   = 4.5;
+    float cubeR     = 3.0;
+
+    // http://gfs.sourceforge.net/wiki/index.php/GfsSurface
+    sphere = x*x + y*y + z*z - sphereR*sphereR;
+    float cube = max(abs(x), max(abs(y), abs(z))) - cubeR;
+    float cylinder1 = x*x + y*y - cylinderR*cylinderR;
+    float cylinder2 = z*z + y*y - cylinderR*cylinderR;
+    float cylinder3 = x*x + z*z - cylinderR*cylinderR;
+    float cylinderU = min(cylinder1, min(cylinder2, cylinder3));
+    float sIc = max(sphere, cube);
+    return max(sIc, -cylinderU);
 
 
-    //return caseNumberFromVertices(1,0,0,1,1,0,0,1);
+
+
+    //return min(floor, sphere);
+
+    //return densityUnion(floor, gyroid);
+
+    //return min(surface, floor);
+
+
+}
+
+// Returns 1 if there is solid matter at pos and 0, if there is not!
+int isSolidMatter(vec3 pos) {
+    //return length(vec3(pos) - sphereCenter) <= sphereRadius ? 1 : 0;
+    return getDensityAtPosition(pos) <= 0 ? 1 : 0;
+}
+
+int createCase(vec3 index) {
+
+    int v0 = isSolidMatter(index);
+    int v1 = isSolidMatter(index + vec3(0,1,0));
+    int v2 = isSolidMatter(index + vec3(1,1,0));
+    int v3 = isSolidMatter(index + vec3(1,0,0));
+    int v4 = isSolidMatter(index + vec3(0,0,1));
+    int v5 = isSolidMatter(index + vec3(0,1,1));
+    int v6 = isSolidMatter(index + vec3(1,1,1));
+    int v7 = isSolidMatter(index + vec3(1,0,1));
+
     return caseNumberFromVertices(v7,v6,v5,v4,v3,v2,v1,v0);
 }
 
+// Linear interpolation between the densities at p1 and p2.
+// 0 is expected to represent the actual surface. Negative values
+// are solid matter, positive are no matter.
+//
+// For a fancy, more minecrafty-look, just return 0.5. It will still look
+// close to what you expect, but more blocky :)
 float densityInterpolation(vec3 p, vec3 p1, vec3 p2) {
+    float densityAtP1 = getDensityAtPosition(p+p1);
+    float densityAtP2 = getDensityAtPosition(p+p2);
 
-    float densityAtP1 = length((p+p1) - sphereCenter);
-    float densityAtP2 = length((p+p2) - sphereCenter);
-
-    float maxDensityDifference = densityAtP2-densityAtP1;
-
-    return (sphereRadius - densityAtP1) / maxDensityDifference;
+    //return 0.5;
+    return -densityAtP1 / (densityAtP2 - densityAtP1);
 }
 
 vec3 getIntersectionFromEdge(int edgeIndex, vec3 p) {
@@ -143,6 +211,19 @@ vec3 getIntersectionFromEdge(int edgeIndex, vec3 p) {
     return vec3(-10, -10, -10);
 }
 
+// Normal calculation using partial derivatives of close density values.
+vec3 calcNormalAt(vec3 pos) {
+
+    float d = 1.0/float(max(WORK_GROUP_SIZE_X, max(WORK_GROUP_SIZE_Y, WORK_GROUP_SIZE_Z)));
+    vec3 normal;
+
+    normal.x = getDensityAtPosition(pos + vec3(d,0,0)) - getDensityAtPosition(pos + vec3(-d,0,0));
+    normal.y = getDensityAtPosition(pos + vec3(0,d,0)) - getDensityAtPosition(pos + vec3(0,-d,0));
+    normal.z = getDensityAtPosition(pos + vec3(0,0,d)) - getDensityAtPosition(pos + vec3(0,0,-d));
+
+    return normalize(normal);
+}
+
 void createTrianglesForCase(uvec3 index) {
 
     uint linearIndex = WORK_GROUP_SIZE_X*WORK_GROUP_SIZE_Y*index.z + WORK_GROUP_SIZE_X*index.y + index.x;
@@ -162,15 +243,25 @@ void createTrianglesForCase(uvec3 index) {
         triangles[layoutPos + i].vertices[1].pos = vec4(v1,0);
         triangles[layoutPos + i].vertices[2].pos = vec4(v2,0);
 
-        triangles[layoutPos + i].vertices[0].normal = vec4(cross(v1-v0, v2-v0), 0);
-        triangles[layoutPos + i].vertices[1].normal = vec4(cross(v2-v1, v0-v1), 0);
-        triangles[layoutPos + i].vertices[2].normal = vec4(cross(v0-v2, v1-v2), 0);
+        // Low quality normals, producing equal normal for all three vertices of a triangle.
+        //triangles[layoutPos + i].vertices[0].normal = vec4(cross(v1-v0, v2-v0), 0);
+        //triangles[layoutPos + i].vertices[1].normal = vec4(cross(v2-v1, v0-v1), 0);
+        //triangles[layoutPos + i].vertices[2].normal = vec4(cross(v0-v2, v1-v2), 0);
+
+        // High quality normals using partial derivatives of density
+        triangles[layoutPos + i].vertices[0].normal = vec4(calcNormalAt(v0), 0);
+        triangles[layoutPos + i].vertices[1].normal = vec4(calcNormalAt(v1), 0);
+        triangles[layoutPos + i].vertices[2].normal = vec4(calcNormalAt(v2), 0);
 
     }
 }
 
+// This will be called in the first shader run.
+// Here, only the potential triangles are counted and written into a buffer.
+// This way, we can fill the position buffer without having empty spaces in between.
+// The actual cases are also cached and reused in the second run.
 void calculateMemorySizes(uvec3 index) {
-    int cubeCase = createCase(index);
+    int cubeCase = createCase(vec3(index));
     uint i = WORK_GROUP_SIZE_X*WORK_GROUP_SIZE_Y*index.z + WORK_GROUP_SIZE_X*index.y + index.x;
     cases[i] = cubeCase;
     layoutSize[i] = triangleCount[cubeCase];
@@ -181,8 +272,10 @@ void main(void)
     uvec3 index = gl_GlobalInvocationID.xyz;
 
     if (calculateSizeOnly) {
+        // First shader invocation
         calculateMemorySizes(index);
     } else {
+        // Second shader invocation, using precalculated data from the first run.
         createTrianglesForCase(index);
     }
 

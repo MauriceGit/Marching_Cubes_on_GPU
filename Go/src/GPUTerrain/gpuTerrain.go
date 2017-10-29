@@ -11,6 +11,7 @@ import (
     "unsafe"
     "github.com/go-gl/gl/v4.5-core/gl"
     "github.com/go-gl/glfw/v3.2/glfw"
+    //"github.com/MauriceGit/half"
 )
 
 // Constants and global variables
@@ -376,6 +377,8 @@ func createMarchingCubeConstBuffers() {
 
 }
 
+// Here, the actual triangles are calculated and written into by the second marching cube shader invocation.
+// This buffer is later used for rendering!
 func createPositionBuffers() {
 
     emptyVec := mgl32.Vec4{}
@@ -393,8 +396,7 @@ func createPositionBuffers() {
 
     gl.GenBuffers    (1, &g_positionBuffer);
     gl.BindBuffer    (gl.ARRAY_BUFFER, g_positionBuffer);
-    // This feels a little bit retarded. Lets *hope*, that all the data is actually linear in memory, like a C-Array...
-    // At least, this seems to be the case :) (https://research.swtch.com/godata)
+    // Data is ordered linear in memory :) (https://research.swtch.com/godata)
     gl.BufferData    (gl.ARRAY_BUFFER, g_triangleCount * triangleSize, gl.Ptr(&g_computeTriangles[0].Vertices[0].Pos[0]), gl.DYNAMIC_DRAW);
 
     gl.GenVertexArrays(1, &g_positionVertexBuffer)
@@ -407,6 +409,9 @@ func createPositionBuffers() {
     gl.VertexAttribPointer(1, 4, gl.FLOAT, true, int32(stride), gl.PtrOffset(vec4Size))
 }
 
+// Each small cube writes into this buffer, how many triangles it wants to create.
+// Using this information, we can later fill the position buffer up, without having
+// empty positions.
 func createTriangleLayoutSizeBuffer() {
 
     triangleLayoutSizes := make([]int32, g_localWorkGroupCount)
@@ -421,6 +426,8 @@ func createTriangleLayoutSizeBuffer() {
 
 }
 
+
+// A Buffer where the actual cases (for all corners of the cube) are written into.
 func createCasesBuffer() {
     cases := make([]int32, g_localWorkGroupCount)
 
