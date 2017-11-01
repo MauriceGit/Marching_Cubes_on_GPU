@@ -232,7 +232,7 @@ func CreateObject(geo Geometry, pos, scale, color mgl32.Vec3, isLight bool) Obje
     return Object {
         Geo: geo,
         Pos: pos,
-        Scale: scale,
+        Scale: scale.Mul(0.5),
         Color: color,
         IsLight: isLight,
     }

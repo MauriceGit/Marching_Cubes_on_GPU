@@ -4,6 +4,14 @@
 #define WORK_GROUP_SIZE_Y 10
 #define WORK_GROUP_SIZE_Z 10
 
+struct Vertex {
+    vec4 pos;
+    vec4 normal;
+};
+struct Triangle {
+    Vertex vertices[3];
+};
+
 layout (local_size_x = WORK_GROUP_SIZE_X, local_size_y = WORK_GROUP_SIZE_Y, local_size_z = WORK_GROUP_SIZE_Z) in;
 
 // A case is the density definition of one cube. Bitwise added number.
@@ -12,7 +20,6 @@ layout (std430, binding = 0) buffer caseToNumPolys
 {
     int triangleCount[256];
 };
-
 // edgeConnectList gets the same case as input as caseToNumPolys and as second parameter to the access function)
 // the triangle index. If caseToNumPolys is 3, edgeConnectList has triangle index 0..2 defined.
 layout (std430, binding = 1) buffer edgeConnectList
@@ -20,34 +27,33 @@ layout (std430, binding = 1) buffer edgeConnectList
     int edgeList[256*5*3];
 };
 
-struct Vertex {
-    vec4 pos;
-    vec4 normal;
-};
-
-struct Triangle {
-    Vertex vertices[3];
-};
-
 // List of triangle positions and normals
+// Gets filled in the second run of this shader
 layout (std430, binding = 2) buffer positionList
 {
     Triangle triangles[];
 };
 
-// Fills the triangleLayoutSizes buffer so we know, how much memory we need next time.
-uniform bool calculateSizeOnly;
+// Gets filled in the first run of this shader
 layout (std430, binding = 3) buffer triangleLayoutSizes
 {
     int layoutSize[];
 };
+// Gets filled in the first run of this shader
 layout (std430, binding = 4) buffer marchingCubeCases
 {
     int cases[];
 };
 
-uniform vec3  sphereCenter;
-uniform float sphereRadius;
+// Fills the triangleLayoutSizes buffer so we know, how much memory we need next time.
+uniform bool calculateSizeOnly;
+
+// The offset between the dispatched units because they all operate on the same buffer.
+// First-Run uniforms
+uniform int cubeIndexOffset;
+uniform vec3 cubePositionOffset;
+
+
 
 
 // Because of internal memory layout issues (especially with std140),
@@ -72,9 +78,6 @@ float densityUnion(float d1, float d2) {
     return -exp(-b*d1) - exp(-b*d2) + 1.;
 }
 
-// For the implicit volume function of the sphere, it returns negative values for
-// solid matter and positive values for no matter. 0 represents the surface.
-//
 // Feel free to insert any implicit function you like!
 float getDensityAtPosition(vec3 pos) {
 
@@ -82,20 +85,16 @@ float getDensityAtPosition(vec3 pos) {
     float y = pos.y;
     float z = pos.z;
 
-    // Sphere
-    float sphere = length(pos + vec3(0,0,0) - sphereCenter) - sphereRadius/1.3;
-    // Flat floor at y == 0.5
-    float floor = y - 3.5;
+
+    float floor = y - 5;
     // Flat floor at y == 0
 
-    float dx = sin(y) + sin(z) + 3.5;
+    float dx = sin(y) + sin(z) + 1.5;
     float dy = sin(x) + sin(z) + 3.5;
-    float dz = sin(x) + sin(y) + 3.5;
+    float dz = sin(x) + sin(y) + 8.5;
 
     vec3 d = pos - vec3(dx, dy, dz);
     float surface = min(d.x, min(d.y, d.z));
-
-    //return sphere;
 
     float gyroid = cos(x) * sin(y) + cos(y) * sin(z) + cos(z) * sin(x);
     //return gyroid;
@@ -109,16 +108,17 @@ float getDensityAtPosition(vec3 pos) {
     float cubeR     = 3.0;
 
     // http://gfs.sourceforge.net/wiki/index.php/GfsSurface
-    sphere = x*x + y*y + z*z - sphereR*sphereR;
+    float sphere = x*x + y*y + z*z - sphereR*sphereR;
     float cube = max(abs(x), max(abs(y), abs(z))) - cubeR;
     float cylinder1 = x*x + y*y - cylinderR*cylinderR;
     float cylinder2 = z*z + y*y - cylinderR*cylinderR;
     float cylinder3 = x*x + z*z - cylinderR*cylinderR;
     float cylinderU = min(cylinder1, min(cylinder2, cylinder3));
     float sIc = max(sphere, cube);
-    return max(sIc, -cylinderU);
+    //return max(sIc, -cylinderU);
 
-
+    return cylinderU;
+    return floor;
 
 
     //return min(floor, sphere);
@@ -132,7 +132,6 @@ float getDensityAtPosition(vec3 pos) {
 
 // Returns 1 if there is solid matter at pos and 0, if there is not!
 int isSolidMatter(vec3 pos) {
-    //return length(vec3(pos) - sphereCenter) <= sphereRadius ? 1 : 0;
     return getDensityAtPosition(pos) <= 0 ? 1 : 0;
 }
 
@@ -214,7 +213,7 @@ vec3 getIntersectionFromEdge(int edgeIndex, vec3 p) {
 // Normal calculation using partial derivatives of close density values.
 vec3 calcNormalAt(vec3 pos) {
 
-    float d = 1.0/float(max(WORK_GROUP_SIZE_X, max(WORK_GROUP_SIZE_Y, WORK_GROUP_SIZE_Z)));
+    float d = 1.0/float(max(WORK_GROUP_SIZE_X, max(WORK_GROUP_SIZE_Y, WORK_GROUP_SIZE_Z)))/10.;
     vec3 normal;
 
     normal.x = getDensityAtPosition(pos + vec3(d,0,0)) - getDensityAtPosition(pos + vec3(-d,0,0));
@@ -226,7 +225,7 @@ vec3 calcNormalAt(vec3 pos) {
 
 void createTrianglesForCase(uvec3 index) {
 
-    uint linearIndex = WORK_GROUP_SIZE_X*WORK_GROUP_SIZE_Y*index.z + WORK_GROUP_SIZE_X*index.y + index.x;
+    uint linearIndex = WORK_GROUP_SIZE_X*WORK_GROUP_SIZE_Y*index.z + WORK_GROUP_SIZE_X*index.y + index.x + cubeIndexOffset;
     int cubeCase = cases[linearIndex];
     int caseTriangleCount = triangleCount[cubeCase];
 
@@ -235,9 +234,11 @@ void createTrianglesForCase(uvec3 index) {
     for (int i = 0; i < caseTriangleCount; i++) {
         ivec3 edgeIntersections = edgeListAt(cubeCase, i);
 
-        vec3 v0 = getIntersectionFromEdge(edgeIntersections[0], vec3(index)) + vec3(index);
-        vec3 v1 = getIntersectionFromEdge(edgeIntersections[1], vec3(index)) + vec3(index);
-        vec3 v2 = getIntersectionFromEdge(edgeIntersections[2], vec3(index)) + vec3(index);
+        vec3 cubePos = vec3(index) + cubePositionOffset;
+
+        vec3 v0 = getIntersectionFromEdge(edgeIntersections[0], cubePos) + cubePos;
+        vec3 v1 = getIntersectionFromEdge(edgeIntersections[1], cubePos) + cubePos;
+        vec3 v2 = getIntersectionFromEdge(edgeIntersections[2], cubePos) + cubePos;
 
         triangles[layoutPos + i].vertices[0].pos = vec4(v0,0);
         triangles[layoutPos + i].vertices[1].pos = vec4(v1,0);
@@ -261,8 +262,8 @@ void createTrianglesForCase(uvec3 index) {
 // This way, we can fill the position buffer without having empty spaces in between.
 // The actual cases are also cached and reused in the second run.
 void calculateMemorySizes(uvec3 index) {
-    int cubeCase = createCase(vec3(index));
-    uint i = WORK_GROUP_SIZE_X*WORK_GROUP_SIZE_Y*index.z + WORK_GROUP_SIZE_X*index.y + index.x;
+    int cubeCase = createCase(vec3(index) + cubePositionOffset);
+    uint i = WORK_GROUP_SIZE_X*WORK_GROUP_SIZE_Y*index.z + WORK_GROUP_SIZE_X*index.y + index.x + cubeIndexOffset;
     cases[i] = cubeCase;
     layoutSize[i] = triangleCount[cubeCase];
 }

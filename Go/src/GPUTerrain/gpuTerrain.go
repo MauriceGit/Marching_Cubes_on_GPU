@@ -28,7 +28,7 @@ const (
 
 const g_WindowTitle  = "First test to create Marching Cubes"
 var g_ShaderID uint32
-var g_marchingCubesProgram uint32
+
 
 // Normal Camera
 var g_fovy      = mgl32.DegToRad(90.0)
@@ -50,19 +50,43 @@ type Triangle struct {
     Vertices []Vertex
 }
 
+// One "unit" consist of i.e. 10^3 small cubes for which triangles
+// are calculated using the MarchingCubes algorithm.
+// One unit is dispatched all at once to the GPU and calculated in parallel.
+// Several units allow for more/larger areas to be triangulated.
+type MarchingCubeUnit struct {
+    PositionOffset      mgl32.Vec3
+    LocalWorkGroupCount int
+    RenderTriangleCount int
+    // Shows the outline (as wireframe) of a Marching-Cube-Unit (Box/Cube)
+    BoxOutline          Object
+    ShowOutline         bool
+}
 
+// This holds all the information, counters and buffers
+// to create and render the marching cubes, consisting of several
+// "units" (blocks that are dispatched to the GPU consecutively).
+type MarchingCubes struct {
+    // The shader used for calculating the marching cubes.
+    ShaderID                uint32
+    // This is the worst case, if every cube actually creates 5 triangles.
+    // This is not realistic, so optimize later!
+    TriangleCount           int
+    // This arraybuffer is is main handle to the calculated positions on the GPU.
+    PositionArrayBuffer     uint32
+    // This points to the vertex buffer (see g_positionBuffer) for rendering
+    PositionVertexBuffer    uint32
+    // The buffer, the first run of marching cubes writes the triangle count into, they like to generate.
+    TriangleLayoutSizesBuffer   uint32
+    // How many units we create.
+    UnitCount               int
+    // The instances of every Marching cube
+    MarchingCubeUnits       []MarchingCubeUnit
 
-var g_localWorkGroupCount int = g_cubeWidth * g_cubeHeight * g_cubeDepth
-var g_renderTriangleCount int = 0
-// This is the worst case, if every cube actually creates 5 triangles.
-// This is not realistic, so optimize later!
-var g_triangleCount int = g_localWorkGroupCount * 5
+}
 
-var g_computeTriangles []Triangle
-var g_positionBuffer uint32
-var g_positionVertexBuffer uint32
+var g_marchingCubes MarchingCubes
 
-var g_triangleLayoutSizesBuffer uint32
 
 var g_timeSum float32 = 0.0
 var g_lastCallTime float64 = 0.0
@@ -138,7 +162,6 @@ func renderObject(shader uint32, obj Object) {
     }
     gl.Uniform1i(gl.GetUniformLocation(shader, gl.Str("isLight\x00")), isLighti)
 
-    // And draw one panel.
     gl.DrawArrays(gl.TRIANGLES, 0, obj.Geo.VertexCount)
 
     gl.BindVertexArray(0)
@@ -156,15 +179,13 @@ func renderPositionBuffer(shader uint32) {
     gl.Uniform1i(gl.GetUniformLocation(shader, gl.Str("isLight\x00")), isLighti)
 
     /* Vertex-Buffer zum Rendern der Positionen */
-    gl.BindVertexArray (g_positionVertexBuffer);
-
-    gl.DrawArrays(gl.TRIANGLES, 0, int32(3*g_renderTriangleCount));
-
+    gl.BindVertexArray (g_marchingCubes.PositionVertexBuffer);
+    gl.DrawArrays(gl.TRIANGLES, 0, int32(3*g_marchingCubes.TriangleCount));
     gl.BindVertexArray(0)
 }
 
 
-func renderFromCamera(shader uint32) {
+func renderEverything(shader uint32) {
 
     gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
     gl.Enable(gl.DEPTH_TEST)
@@ -182,44 +203,49 @@ func renderFromCamera(shader uint32) {
 
     renderPositionBuffer(shader)
 
+    var polyMode int32
+    gl.GetIntegerv(gl.POLYGON_MODE, &polyMode)
+    gl.PolygonMode(gl.FRONT_AND_BACK, gl.LINE)
+    for i,_ := range g_marchingCubes.MarchingCubeUnits {
+        renderObject(shader, g_marchingCubes.MarchingCubeUnits[i].BoxOutline)
+    }
+    gl.PolygonMode(gl.FRONT_AND_BACK, uint32(polyMode))
+
     gl.UseProgram(0)
 
 }
 
-func render(window *glfw.Window) {
+func calculateAndRenderMarchingCubes(window *glfw.Window) {
 
-
-
-
-
-    gl.UseProgram(g_marchingCubesProgram)
+    gl.UseProgram(g_marchingCubes.ShaderID)
 
     // This will fill the buffer with the sizes, that we need memory for in the next run.
-    gl.Uniform1i(gl.GetUniformLocation(g_marchingCubesProgram, gl.Str("calculateSizeOnly\x00")), 1)
+    gl.Uniform1i(gl.GetUniformLocation(g_marchingCubes.ShaderID, gl.Str("calculateSizeOnly\x00")), 1)
+    gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 3, g_marchingCubes.TriangleLayoutSizesBuffer);
 
+    cubeUnitSize := g_cubeWidth * g_cubeHeight * g_cubeDepth
 
-    // Test! This has a center and radius, to define a sphere.
-    //center := []float32{g_cubeWidth/2.0,g_cubeHeight/2.0,g_cubeDepth/2.0}
-    center := []float32{5,5,5}
-    gl.Uniform3fv(gl.GetUniformLocation(g_marchingCubesProgram, gl.Str("sphereCenter\x00")), 1, &center[0])
-    gl.Uniform1f(gl.GetUniformLocation(g_marchingCubesProgram, gl.Str("sphereRadius\x00")), 4.5)
+    for i:=0; i < g_marchingCubes.UnitCount; i++ {
+        gl.Uniform1i(gl.GetUniformLocation(g_marchingCubes.ShaderID, gl.Str("cubeIndexOffset\x00")), int32(i * cubeUnitSize))
+        gl.Uniform3fv(gl.GetUniformLocation(g_marchingCubes.ShaderID, gl.Str("cubePositionOffset\x00")),1, &g_marchingCubes.MarchingCubeUnits[i].PositionOffset[0])
+        gl.DispatchCompute(1, 1, 1)
+    }
 
-
-    gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 3, g_triangleLayoutSizesBuffer);
-    gl.DispatchCompute(1, 1, 1)
     gl.MemoryBarrier(gl.ALL_BARRIER_BITS)
 
+    layoutArraySize := g_marchingCubes.UnitCount * cubeUnitSize
+
     // Add up all values, to determine the exact storage layout locations for each shader invocation
-    ptr := gl.MapBufferRange(gl.SHADER_STORAGE_BUFFER, 0, g_localWorkGroupCount*int(unsafe.Sizeof(int32(0))), gl.MAP_WRITE_BIT | gl.MAP_READ_BIT)
+    ptr := gl.MapBufferRange(gl.SHADER_STORAGE_BUFFER, 0, layoutArraySize*int(unsafe.Sizeof(int32(0))), gl.MAP_WRITE_BIT | gl.MAP_READ_BIT)
     // This is really tricky. We get a pure C-Array pointer from glMapBufferRange, which is in our user address space.
     // Unfortunately, we cannot use it directly in Go or convert it easily to a usable slice.
     // So instead, we apply some magic (bit-shift-stuff) and work on C.int datatype directly. This should operate then directly
     // on the underlaying C-Array in memory.
-    layoutSizes := (*[1 << 30]C.int)(unsafe.Pointer(ptr))[:g_localWorkGroupCount:g_localWorkGroupCount]
-    var lastSize int = int(layoutSizes[g_localWorkGroupCount-1])
+    layoutSizes := (*[1 << 30]C.int)(unsafe.Pointer(ptr))[:layoutArraySize:layoutArraySize]
+    var lastSize int = int(layoutSizes[layoutArraySize-1])
     var sum  C.int = 0
     var sum2 C.int = layoutSizes[0]
-    for i := 1; i < g_localWorkGroupCount; i++ {
+    for i := 1; i < layoutArraySize; i++ {
         sum = layoutSizes[i]
         layoutSizes[i] = sum2
         sum2 += sum
@@ -227,19 +253,33 @@ func render(window *glfw.Window) {
     layoutSizes[0] = 0
 
     // This determines, how many triangles actually have to be rendered!
-    g_renderTriangleCount = int(layoutSizes[g_localWorkGroupCount-1]) + lastSize
+    lastTriangleCount := g_marchingCubes.TriangleCount
+    g_marchingCubes.TriangleCount = int(layoutSizes[layoutArraySize-1]) + lastSize
+
+    if lastTriangleCount != g_marchingCubes.TriangleCount {
+        fmt.Println("triangle count: ", g_marchingCubes.TriangleCount)
+        fmt.Println("triangles/cube: ", float32(g_marchingCubes.TriangleCount)/float32(layoutArraySize))
+        fmt.Println("unit count:     ", g_marchingCubes.UnitCount)
+    }
 
     gl.UnmapBuffer(gl.SHADER_STORAGE_BUFFER)
 
     // This will actually create the triangle data seamless in the g_positionBuffer.
-    gl.Uniform1i(gl.GetUniformLocation(g_marchingCubesProgram, gl.Str("calculateSizeOnly\x00")), 0)
-    gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 2, g_positionBuffer);
-    gl.DispatchCompute(1, 1, 1)
+    gl.Uniform1i(gl.GetUniformLocation(g_marchingCubes.ShaderID, gl.Str("calculateSizeOnly\x00")), 0)
+    gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 2, g_marchingCubes.PositionArrayBuffer);
+
+    for i:=0; i < g_marchingCubes.UnitCount; i++ {
+        gl.Uniform1i(gl.GetUniformLocation(g_marchingCubes.ShaderID, gl.Str("cubeIndexOffset\x00")), int32(i * cubeUnitSize))
+        gl.Uniform3fv(gl.GetUniformLocation(g_marchingCubes.ShaderID, gl.Str("cubePositionOffset\x00")),1, &g_marchingCubes.MarchingCubeUnits[i].PositionOffset[0])
+        gl.DispatchCompute(1, 1, 1)
+    }
+
+
     gl.MemoryBarrier(gl.ALL_BARRIER_BITS)
     gl.UseProgram(0)
 
 
-    renderFromCamera(g_ShaderID)
+    renderEverything(g_ShaderID)
 
 }
 
@@ -331,7 +371,7 @@ func mainLoop (window *glfw.Window) {
         displayFPS(window)
 
         // This actually renders everything.
-        render(window)
+        calculateAndRenderMarchingCubes(window)
 
         window.SwapBuffers()
         glfw.PollEvents()
@@ -341,7 +381,7 @@ func mainLoop (window *glfw.Window) {
 
 }
 
-func createMarchingCubeConstBuffers() {
+func createMarchingCubeConstBuffers(marchingCubesShaderID uint32) {
 
     caseToNumPolys := []int32{0, 1, 1, 2, 1, 2, 2, 3,  1, 2, 2, 3, 2, 3, 3, 2,  1, 2, 2, 3, 2, 3, 3, 4,  2, 3, 3, 4, 3, 4, 4, 3,
                                1, 2, 2, 3, 2, 3, 3, 4,  2, 3, 3, 4, 3, 4, 4, 3,  2, 3, 3, 2, 3, 4, 4, 3,  3, 4, 4, 3, 4, 5, 5, 2,
@@ -357,7 +397,7 @@ func createMarchingCubeConstBuffers() {
     gl.BindBuffer    (gl.ARRAY_BUFFER, caseABO);
     gl.BufferData    (gl.ARRAY_BUFFER, len(caseToNumPolys)*int(unsafe.Sizeof(int32(0))), gl.Ptr(caseToNumPolys), gl.STATIC_READ);
 
-    gl.UseProgram(g_marchingCubesProgram)
+    gl.UseProgram(marchingCubesShaderID)
     gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 0, caseABO);
     gl.UseProgram(0)
 
@@ -370,7 +410,7 @@ func createMarchingCubeConstBuffers() {
     gl.BindBuffer    (gl.ARRAY_BUFFER, edgeListABO);
     gl.BufferData    (gl.ARRAY_BUFFER, 256*5*3*int(unsafe.Sizeof(int32(0))), gl.Ptr(edgeConnectList), gl.STATIC_READ);
 
-    gl.UseProgram(g_marchingCubesProgram)
+    gl.UseProgram(marchingCubesShaderID)
     gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 1, edgeListABO);
     gl.UseProgram(0)
 
@@ -379,7 +419,11 @@ func createMarchingCubeConstBuffers() {
 
 // Here, the actual triangles are calculated and written into by the second marching cube shader invocation.
 // This buffer is later used for rendering!
-func createPositionBuffers() {
+// Returns the positionArrayBuffer and vertexArrayBuffer.
+func createPositionBuffers(totalTriangleCount int) (uint32, uint32) {
+
+    var positionArrayBuffer  uint32
+    var positionVertexBuffer uint32
 
     emptyVec := mgl32.Vec4{}
     vec4Size := int(unsafe.Sizeof(emptyVec))
@@ -389,54 +433,59 @@ func createPositionBuffers() {
 
     triangleSize := 3*stride
 
-    g_computeTriangles = make([]Triangle, g_triangleCount)
-    for i,_ := range g_computeTriangles  {
-        g_computeTriangles[i] = Triangle{make([]Vertex, 3)}
+    computeTriangles := make([]Triangle, totalTriangleCount)
+    for i,_ := range computeTriangles  {
+        computeTriangles[i] = Triangle{make([]Vertex, 3)}
     }
 
-    gl.GenBuffers    (1, &g_positionBuffer);
-    gl.BindBuffer    (gl.ARRAY_BUFFER, g_positionBuffer);
+    gl.GenBuffers    (1, &positionArrayBuffer);
+    gl.BindBuffer    (gl.ARRAY_BUFFER, positionArrayBuffer);
     // Data is ordered linear in memory :) (https://research.swtch.com/godata)
-    gl.BufferData    (gl.ARRAY_BUFFER, g_triangleCount * triangleSize, gl.Ptr(&g_computeTriangles[0].Vertices[0].Pos[0]), gl.DYNAMIC_DRAW);
+    gl.BufferData    (gl.ARRAY_BUFFER, totalTriangleCount * triangleSize, gl.Ptr(&computeTriangles[0].Vertices[0].Pos[0]), gl.DYNAMIC_DRAW);
 
-    gl.GenVertexArrays(1, &g_positionVertexBuffer)
-    gl.BindVertexArray(g_positionVertexBuffer)
+    gl.GenVertexArrays(1, &positionVertexBuffer)
+    gl.BindVertexArray(positionVertexBuffer)
 
     gl.EnableVertexAttribArray(0)
     gl.VertexAttribPointer(0, 4, gl.FLOAT, false, int32(stride), gl.PtrOffset(0))
     gl.EnableVertexAttribArray(1)
     // If adding more attributes to a vertex, change the Offset and potentially stride here!
     gl.VertexAttribPointer(1, 4, gl.FLOAT, true, int32(stride), gl.PtrOffset(vec4Size))
+
+    return positionArrayBuffer, positionVertexBuffer
 }
 
 // Each small cube writes into this buffer, how many triangles it wants to create.
 // Using this information, we can later fill the position buffer up, without having
 // empty positions.
-func createTriangleLayoutSizeBuffer() {
+func createTriangleLayoutSizeBuffer(totalCubeCount int, marchingCubesShaderID uint32) uint32 {
 
-    triangleLayoutSizes := make([]int32, g_localWorkGroupCount)
+    triangleLayoutSizes := make([]int32, totalCubeCount)
+    var triangleLayoutSizesBuffer uint32
 
-    gl.GenBuffers    (1, &g_triangleLayoutSizesBuffer);
-    gl.BindBuffer    (gl.ARRAY_BUFFER, g_triangleLayoutSizesBuffer);
-    gl.BufferData    (gl.ARRAY_BUFFER, g_localWorkGroupCount*int(unsafe.Sizeof(int32(0))), gl.Ptr(&triangleLayoutSizes[0]), gl.DYNAMIC_COPY);
+    gl.GenBuffers    (1, &triangleLayoutSizesBuffer);
+    gl.BindBuffer    (gl.ARRAY_BUFFER, triangleLayoutSizesBuffer);
+    gl.BufferData    (gl.ARRAY_BUFFER, totalCubeCount*int(unsafe.Sizeof(int32(0))), gl.Ptr(&triangleLayoutSizes[0]), gl.DYNAMIC_COPY);
 
-    gl.UseProgram(g_marchingCubesProgram)
-    gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 3, g_triangleLayoutSizesBuffer);
+    gl.UseProgram(marchingCubesShaderID)
+    gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 3, triangleLayoutSizesBuffer);
     gl.UseProgram(0)
+
+    return triangleLayoutSizesBuffer
 
 }
 
 
 // A Buffer where the actual cases (for all corners of the cube) are written into.
-func createCasesBuffer() {
-    cases := make([]int32, g_localWorkGroupCount)
+func createCasesBuffer(totalCubeCount int, marchingCubesShaderID uint32) {
+    cases := make([]int32, totalCubeCount)
 
     var casesABO uint32 = 0
     gl.GenBuffers    (1, &casesABO);
     gl.BindBuffer    (gl.ARRAY_BUFFER, casesABO);
-    gl.BufferData    (gl.ARRAY_BUFFER, g_localWorkGroupCount*int(unsafe.Sizeof(int32(0))), gl.Ptr(&cases[0]), gl.STATIC_READ);
+    gl.BufferData    (gl.ARRAY_BUFFER, totalCubeCount*int(unsafe.Sizeof(int32(0))), gl.Ptr(&cases[0]), gl.STATIC_READ);
 
-    gl.UseProgram(g_marchingCubesProgram)
+    gl.UseProgram(marchingCubesShaderID)
     gl.BindBufferBase(gl.SHADER_STORAGE_BUFFER, 4, casesABO);
     gl.UseProgram(0)
 }
@@ -462,18 +511,68 @@ func main() {
         panic(err)
     }
 
-    g_marchingCubesProgram, err = NewComputeProgram(path+"marchingCubes.comp")
+
+
+    g_light = CreateObject(CreateUnitSphere(10), mgl32.Vec3{3,15,0}, mgl32.Vec3{0.2,0.2,0.2}, mgl32.Vec3{1,1,0}, true)
+
+
+    trianglesPerCube        := float32(2.0)
+    marchingCubeCountWidth  := 6
+    marchingCubeCountHeight := 6
+    marchingCubeCountDepth  := 6
+    marchingCubeCount := marchingCubeCountWidth * marchingCubeCountHeight * marchingCubeCountDepth
+    marchingCubeUnits := make([]MarchingCubeUnit, marchingCubeCount, marchingCubeCount)
+
+    addedLocalWorkgroupCount := 0
+
+    for x := 0; x < marchingCubeCountWidth; x+=1 {
+        for y := 0; y < marchingCubeCountHeight; y+=1 {
+            for z := 0; z < marchingCubeCountDepth; z+=1 {
+
+                i := int(z * marchingCubeCountWidth * marchingCubeCountHeight + y * marchingCubeCountHeight + x)
+
+                marchingCubeUnits[i] = MarchingCubeUnit {
+                    PositionOffset:         mgl32.Vec3{float32(x*g_cubeWidth),float32(y*g_cubeHeight),float32(z*g_cubeDepth)},
+                    LocalWorkGroupCount:    g_cubeWidth * g_cubeHeight * g_cubeDepth,
+                    RenderTriangleCount:    0,
+                    BoxOutline:             CreateObject(CreateUnitCube(1), mgl32.Vec3{float32(x*g_cubeWidth+5),float32(y*g_cubeHeight+5),float32(z*g_cubeDepth+5)}, mgl32.Vec3{10,10,10}, mgl32.Vec3{1,0,0}, false),
+                    ShowOutline:            true,
+                }
+                addedLocalWorkgroupCount += marchingCubeUnits[i].LocalWorkGroupCount
+            }
+        }
+    }
+
+    marchingCubesProgram, err := NewComputeProgram(path+"marchingCubes.comp")
     if err != nil {
         panic(err)
     }
 
-    g_light = CreateObject(CreateUnitSphere(10), mgl32.Vec3{3,15,0}, mgl32.Vec3{0.1,0.1,0.1}, mgl32.Vec3{1,1,0}, true)
+    positionArrayBuffer, positionVertexBuffer := createPositionBuffers(int(float32(addedLocalWorkgroupCount) * trianglesPerCube))
+    triangleLayoutSizesBuffer := createTriangleLayoutSizeBuffer(addedLocalWorkgroupCount, marchingCubesProgram)
+    createMarchingCubeConstBuffers(marchingCubesProgram)
+    createCasesBuffer(addedLocalWorkgroupCount, marchingCubesProgram)
+
+    g_marchingCubes = MarchingCubes {
+        ShaderID:               marchingCubesProgram,
+        // Absolute worst-case!!! Correct that later.
+        TriangleCount:          int(float32(addedLocalWorkgroupCount) * trianglesPerCube),
+
+        PositionArrayBuffer:    positionArrayBuffer,
+        PositionVertexBuffer:   positionVertexBuffer,
+        TriangleLayoutSizesBuffer: triangleLayoutSizesBuffer,
 
 
-    createMarchingCubeConstBuffers()
-    createPositionBuffers()
-    createTriangleLayoutSizeBuffer()
-    createCasesBuffer()
+        UnitCount:              marchingCubeCount,
+        MarchingCubeUnits:      marchingCubeUnits,
+    }
+
+    //g_marchingCubesBoxOutline = CreateObject(CreateUnitCube(1), mgl32.Vec3{5,5,5}, mgl32.Vec3{10,10,10}, mgl32.Vec3{1,0,0}, false)
+
+
+
+
+
 
     gl.PointSize(3.0);
 
