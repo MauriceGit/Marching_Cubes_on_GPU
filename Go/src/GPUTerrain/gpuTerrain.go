@@ -33,8 +33,8 @@ var g_ShaderID uint32
 // Normal Camera
 var g_fovy      = mgl32.DegToRad(90.0)
 var g_aspect    = float32(g_WindowWidth)/g_WindowHeight
-var g_nearPlane = float32(0.01)
-var g_farPlane  = float32(200.0)
+var g_nearPlane = float32(0.1)
+var g_farPlane  = float32(2000.0)
 
 var g_viewMatrix          mgl32.Mat4
 
@@ -206,9 +206,9 @@ func renderEverything(shader uint32) {
     var polyMode int32
     gl.GetIntegerv(gl.POLYGON_MODE, &polyMode)
     gl.PolygonMode(gl.FRONT_AND_BACK, gl.LINE)
-    //for i,_ := range g_marchingCubes.MarchingCubeUnits {
-    //    renderObject(shader, g_marchingCubes.MarchingCubeUnits[i].BoxOutline)
-    //}
+    for i,_ := range g_marchingCubes.MarchingCubeUnits {
+        renderObject(shader, g_marchingCubes.MarchingCubeUnits[i].BoxOutline)
+    }
     gl.PolygonMode(gl.FRONT_AND_BACK, uint32(polyMode))
 
     gl.UseProgram(0)
@@ -517,9 +517,9 @@ func main() {
 
 
     trianglesPerCube        := float32(2.0)
-    marchingCubeCountWidth  := 6
-    marchingCubeCountHeight := 2
-    marchingCubeCountDepth  := 6
+    marchingCubeCountWidth  := 15
+    marchingCubeCountHeight := 1
+    marchingCubeCountDepth  := 15
     marchingCubeCount := marchingCubeCountWidth * marchingCubeCountHeight * marchingCubeCountDepth
     marchingCubeUnits := make([]MarchingCubeUnit, marchingCubeCount, marchingCubeCount)
 
