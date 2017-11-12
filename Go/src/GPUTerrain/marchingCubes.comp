@@ -117,8 +117,12 @@ float getDensityAtPosition(vec3 pos) {
     float sIc = max(sphere, cube);
     //return max(sIc, -cylinderU);
 
-    return cylinderU;
-    return floor;
+    //return cylinderU;
+    //return floor;
+    float fx = 0.5;
+    float fy = 0.01;
+    float fz = 0.35;
+    return sin(x*fx) + floor + cos(z*fz);
 
 
     //return min(floor, sphere);

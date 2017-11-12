@@ -206,9 +206,9 @@ func renderEverything(shader uint32) {
     var polyMode int32
     gl.GetIntegerv(gl.POLYGON_MODE, &polyMode)
     gl.PolygonMode(gl.FRONT_AND_BACK, gl.LINE)
-    for i,_ := range g_marchingCubes.MarchingCubeUnits {
-        renderObject(shader, g_marchingCubes.MarchingCubeUnits[i].BoxOutline)
-    }
+    //for i,_ := range g_marchingCubes.MarchingCubeUnits {
+    //    renderObject(shader, g_marchingCubes.MarchingCubeUnits[i].BoxOutline)
+    //}
     gl.PolygonMode(gl.FRONT_AND_BACK, uint32(polyMode))
 
     gl.UseProgram(0)
@@ -231,7 +231,7 @@ func calculateAndRenderMarchingCubes(window *glfw.Window) {
         gl.DispatchCompute(1, 1, 1)
     }
 
-    gl.MemoryBarrier(gl.ALL_BARRIER_BITS)
+    gl.MemoryBarrier(gl.BUFFER_UPDATE_BARRIER_BIT)
 
     layoutArraySize := g_marchingCubes.UnitCount * cubeUnitSize
 
@@ -275,7 +275,7 @@ func calculateAndRenderMarchingCubes(window *glfw.Window) {
     }
 
 
-    gl.MemoryBarrier(gl.ALL_BARRIER_BITS)
+    gl.MemoryBarrier(gl.BUFFER_UPDATE_BARRIER_BIT)
     gl.UseProgram(0)
 
 
@@ -518,7 +518,7 @@ func main() {
 
     trianglesPerCube        := float32(2.0)
     marchingCubeCountWidth  := 6
-    marchingCubeCountHeight := 6
+    marchingCubeCountHeight := 2
     marchingCubeCountDepth  := 6
     marchingCubeCount := marchingCubeCountWidth * marchingCubeCountHeight * marchingCubeCountDepth
     marchingCubeUnits := make([]MarchingCubeUnit, marchingCubeCount, marchingCubeCount)
@@ -529,7 +529,7 @@ func main() {
         for y := 0; y < marchingCubeCountHeight; y+=1 {
             for z := 0; z < marchingCubeCountDepth; z+=1 {
 
-                i := int(z * marchingCubeCountWidth * marchingCubeCountHeight + y * marchingCubeCountHeight + x)
+                i := int(z * marchingCubeCountWidth * marchingCubeCountHeight + y * marchingCubeCountWidth + x)
 
                 marchingCubeUnits[i] = MarchingCubeUnit {
                     PositionOffset:         mgl32.Vec3{float32(x*g_cubeWidth),float32(y*g_cubeHeight),float32(z*g_cubeDepth)},
